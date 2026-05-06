@@ -1,0 +1,59 @@
+name: Render Remotion Video
+
+on:
+  workflow_dispatch:
+    inputs:
+      files:
+        description: 'JSON string of video source files'
+        required: true
+      entry_file:
+        description: 'Entry file'
+        default: '/src/Video.tsx'
+      duration_in_frames:
+        description: 'Frames'
+        default: '150'
+      fps:
+        default: '30'
+      callback_url:
+        description: 'MCP server callback URL'
+        required: true
+      session_id:
+        description: 'Session ID to match response'
+        required: true
+
+jobs:
+  render:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - uses: actions/setup-node@v4
+        with:
+          node-version: '20'
+          cache: 'npm'
+
+      - name: Install dependencies
+        run: npm ci
+
+      - name: Write video source files
+        run: node scripts/write-video-files.mjs
+        env:
+          VIDEO_FILES: ${{ github.event.inputs.files }}
+
+      - name: Install Chrome for Remotion
+        run: npx remotion browser ensure
+
+      - name: Render MP4
+        run: |
+          npx remotion render \
+            ${{ github.event.inputs.entry_file }} \
+            out/video.mp4 \
+            --frames=0-${{ github.event.inputs.duration_in_frames }} \
+            --fps=${{ github.event.inputs.fps }}
+
+      - name: Upload to transfer.sh and callback
+        run: |
+          URL=$(curl -s --upload-file out/video.mp4 https://transfer.sh/video.mp4)
+          curl -s -X POST "${{ github.event.inputs.callback_url }}/render-complete" \
+            -H "Content-Type: application/json" \
+            -d "{\"session_id\": \"${{ github.event.inputs.session_id }}\", \"url\": \"$URL\"}"
