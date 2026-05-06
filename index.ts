@@ -132,6 +132,141 @@ server.tool(
 );
 
 // ---------------------------------------------------------------------------
+// Pexels asset search — images and videos for use in Remotion compositions
+// ---------------------------------------------------------------------------
+
+const searchAssetsSchema = z.object({
+  query: z
+    .string()
+    .describe("Search term, e.g. 'sunset beach', 'city traffic', 'people working'"),
+  type: z
+    .enum(["image", "video"])
+    .describe("Asset type: 'image' for photos, 'video' for footage"),
+  count: z
+    .number()
+    .optional()
+    .default(5)
+    .describe("Number of results to return (max 10)"),
+  orientation: z
+    .enum(["landscape", "portrait", "square"])
+    .optional()
+    .default("landscape")
+    .describe("Preferred orientation — use 'landscape' for 16:9 videos"),
+});
+
+server.tool(
+  {
+    name: "search_assets",
+    description:
+      "Search Pexels for free stock images or videos to use inside the Remotion composition. " +
+      "Returns direct CDN URLs ready to use with <Img src={url} /> or <Video src={url} /> in Remotion code. " +
+      "Call this BEFORE create_video whenever the user wants real photos or footage in their video.",
+    schema: searchAssetsSchema as any,
+  },
+  async (params: z.infer<typeof searchAssetsSchema>) => {
+    const apiKey = process.env.PEXELS_API_KEY;
+
+    if (!apiKey) {
+      return text(
+        "❌ PEXELS_API_KEY is not set.\n" +
+          "1. Get a free key at https://www.pexels.com/api\n" +
+          "2. Add PEXELS_API_KEY to your Render.com environment variables."
+      );
+    }
+
+    const count = Math.min(params.count ?? 5, 10);
+
+    const apiUrl =
+      params.type === "image"
+        ? `https://api.pexels.com/v1/search?query=${encodeURIComponent(params.query)}&per_page=${count}&orientation=${params.orientation}`
+        : `https://api.pexels.com/videos/search?query=${encodeURIComponent(params.query)}&per_page=${count}&orientation=${params.orientation}`;
+
+    const res = await fetch(apiUrl, {
+      headers: { Authorization: apiKey },
+    });
+
+    if (!res.ok) {
+      return text(`❌ Pexels API error: HTTP ${res.status}`);
+    }
+
+    const data = (await res.json()) as any;
+
+    // ---- Images ----
+    if (params.type === "image") {
+      const photos: any[] = data.photos ?? [];
+      if (photos.length === 0) {
+        return text(
+          `No images found for "${params.query}". Try a broader search term.`
+        );
+      }
+
+      const lines = [
+        `✅ Found ${photos.length} images for "${params.query}"`,
+        "",
+        "How to use in Remotion:",
+        '  import { Img } from "remotion";',
+        '  <Img src="PASTE_URL_HERE" style={{ width: "100%", height: "100%", objectFit: "cover" }} />',
+        "",
+      ];
+
+      for (const [i, p] of photos.entries()) {
+        lines.push(
+          `[${i + 1}] ${p.alt || "Photo by " + p.photographer}`,
+          `    Full size : ${p.src.original}`,
+          `    Large     : ${p.src.large2x}`,
+          `    Medium    : ${p.src.medium}`,
+          `    Dims      : ${p.width} × ${p.height}px`,
+          `    Credit    : Photo by ${p.photographer} — ${p.url}`,
+          ""
+        );
+      }
+
+      return text(lines.join("\n"));
+    }
+
+    // ---- Videos ----
+    const videos: any[] = data.videos ?? [];
+    if (videos.length === 0) {
+      return text(
+        `No videos found for "${params.query}". Try a broader search term.`
+      );
+    }
+
+    const lines = [
+      `✅ Found ${videos.length} videos for "${params.query}"`,
+      "",
+      "How to use in Remotion:",
+      '  import { Video } from "remotion";',
+      "  <Video",
+      '    src="PASTE_URL_HERE"',
+      "    startFrom={0}",
+      "    endAt={90}  {/* trim to 3s at 30fps */}",
+      '    style={{ width: "100%", height: "100%" }}',
+      "  />",
+      "",
+      "⚠️  Use startFrom / endAt to trim clips to fit your composition duration.",
+      "",
+    ];
+
+    for (const [i, v] of videos.entries()) {
+      const files: any[] = v.video_files ?? [];
+      const hd = files.find((f) => f.quality === "hd") ?? files[0];
+      const sd = files.find((f) => f.quality === "sd") ?? files[0];
+
+      lines.push(
+        `[${i + 1}] ${v.width} × ${v.height}px — ${v.duration}s`,
+        `    HD URL  : ${hd?.link ?? "n/a"}`,
+        `    SD URL  : ${sd?.link ?? "n/a"}`,
+        `    Credit  : Video by ${v.user?.name} — ${v.url}`,
+        ""
+      );
+    }
+
+    return text(lines.join("\n"));
+  }
+);
+
+// ---------------------------------------------------------------------------
 // Video tools
 // ---------------------------------------------------------------------------
 
@@ -183,7 +318,6 @@ server.tool(
   async (rawParams: z.infer<typeof createVideoSchema>, ctx) => {
     const sessionId = ctx.session?.sessionId ?? "default";
 
-    // Parse files from JSON string
     let files: Record<string, string>;
     try {
       const parsed = JSON.parse(rawParams.files);
@@ -203,7 +337,6 @@ server.tool(
       return failProject("files must contain at least one file entry.");
     }
 
-    // Merge with previous session state (if any)
     const previous = getSessionProject(sessionId);
     const mergedFiles = previous ? { ...previous.files, ...files } : files;
 
@@ -226,9 +359,7 @@ server.tool(
     }
 
     const statusLines: string[] = [];
-    if (previous) {
-      statusLines.push("Merged with previous project.");
-    }
+    if (previous) statusLines.push("Merged with previous project.");
 
     return compileAndRespondWithProject(
       parseResult.data,
@@ -272,7 +403,6 @@ server.tool(
       );
     }
 
-    // Trigger GitHub Actions workflow
     const res = await fetch(
       `https://api.github.com/repos/${owner}/${repo}/actions/workflows/render-video.yml/dispatches`,
       {
@@ -298,18 +428,15 @@ server.tool(
 
     if (!res.ok) {
       const body = await res.text();
-      return text(
-        `❌ Failed to trigger GitHub Actions render: HTTP ${res.status}\n${body}`
-      );
+      return text(`❌ Failed to trigger render: HTTP ${res.status}\n${body}`);
     }
 
-    // Wait up to 3 minutes for the callback from GitHub Actions
     const downloadUrl = await waitForRender(sessionId, 180_000);
 
     if (!downloadUrl) {
       return text(
         "⏱ Render timed out after 3 minutes.\n" +
-          `Check your GitHub Actions tab: https://github.com/${owner}/${repo}/actions`
+          `Check: https://github.com/${owner}/${repo}/actions`
       );
     }
 
