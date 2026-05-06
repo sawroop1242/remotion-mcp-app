@@ -1,0 +1,41 @@
+services:
+  - type: web
+    name: remotion-mcp-app
+    runtime: node
+    plan: free
+    region: oregon
+
+    buildCommand: npm install && npm run build
+    startCommand: npm start
+
+    envVars:
+      - key: NODE_VERSION
+        value: 20
+
+      - key: PORT
+        generateValue: false
+        value: 3000
+
+      - key: HOST
+        value: 0.0.0.0
+
+      - key: MCP_URL
+        sync: false   # set this manually in Render dashboard after first deploy
+
+      - key: GITHUB_TOKEN
+        sync: false   # set manually in Render dashboard — never commit this
+
+      - key: GITHUB_OWNER
+        sync: false   # e.g. sawroop1242
+
+      - key: GITHUB_REPO
+        sync: false   # e.g. remotion-mcp-app
+
+      - key: RENDER_CALLBACK_URL
+        sync: false   # e.g. https://remotion-mcp-app.onrender.com
+
+    healthCheckPath: /health
+
+    autoDeploy: true   # auto redeploy on every git push to main
+
+
