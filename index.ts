@@ -471,5 +471,7 @@ server.post("/render-complete", async (c) => {
 server.get("/.well-known/openai-apps-challenge", (c) => {
   return c.text("gP0NHv0ywqzsT3-iJ5is_xR6HysaW9Gbls7TeneGl8M");
 });
+// Add this before await server.listen(port)
+server.get("/health", (c) => c.text("ok"));
 
 await server.listen(port);
