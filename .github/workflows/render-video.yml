@@ -30,10 +30,9 @@ jobs:
       - uses: actions/setup-node@v4
         with:
           node-version: '20'
-          
 
-      - name: Install dependencies
-        run: npm ci
+      - name: Install Dependencies
+        run: npm install
 
       - name: Write video source files
         run: node scripts/write-video-files.mjs
