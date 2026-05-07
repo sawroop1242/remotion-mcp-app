@@ -23,7 +23,9 @@
   },
   "dependencies": {
     "@paper-design/shaders-react": "^0.0.71",
+    "@remotion/cli": "4.0.268",
     "@remotion/player": "4.0.268",
+    "@remotion/renderer": "4.0.268",
     "@remotion/transitions": "4.0.268",
     "mcp-use": "^1.21.4",
     "node-mocks-http": "^1.17.2",
