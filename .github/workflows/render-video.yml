@@ -11,7 +11,6 @@ on:
         default: '/src/Video.tsx'
       composition_id:
         description: 'Composition ID'
-        # FIX 1: matches DEFAULT_META.compositionId in utils.ts
         default: 'Main'
       duration_in_frames:
         description: 'Duration in frames'
@@ -36,8 +35,6 @@ jobs:
         with:
           node-version: '20'
 
-      # FIX 2: single install — @remotion/cli and @remotion/renderer
-      # are now in package.json, so one "npm install" is enough.
       - name: Install Dependencies
         run: npm install
 
@@ -50,21 +47,25 @@ jobs:
         run: mkdir -p out
 
       - name: Write props file
-        # FIX 3: persist inputProps/defaultProps so the render matches the preview
         run: echo '${{ github.event.inputs.props }}' > input-props.json
 
-      # 🔧 FIX: Added validation and properly quoted variables to prevent "No entry point" error
+      # 🔧 FIX: Convert absolute paths to relative paths
       - name: Verify entry file exists
         run: |
           ENTRY="${{ github.event.inputs.entry_file }}"
           echo "🔍 Checking entry file: $ENTRY"
-          if [ ! -f "$ENTRY" ]; then
-            echo "❌ Entry file not found: $ENTRY"
+          
+          # Convert absolute path (/src/Video.tsx) to relative path (src/Video.tsx)
+          ENTRY_RELATIVE="${ENTRY#/}"
+          echo "📝 Relative path: $ENTRY_RELATIVE"
+          
+          if [ ! -f "$ENTRY_RELATIVE" ]; then
+            echo "❌ Entry file not found: $ENTRY_RELATIVE"
             echo "📁 Files in repo:"
-            find . -name "*.tsx" -o -name "*.ts" | head -20
+            find . -name "*.tsx" -o -name "*.ts" | grep -v node_modules | head -20
             exit 1
           fi
-          echo "✅ Entry file found"
+          echo "✅ Entry file found: $ENTRY_RELATIVE"
 
       - name: Render MP4
         env:
@@ -73,19 +74,18 @@ jobs:
           PROPS_PATH: "./input-props.json"
         run: |
           echo "🎬 Starting Remotion render..."
-          echo "   Entry: $ENTRY_FILE"
+          
+          # Convert absolute path to relative path
+          ENTRY_RELATIVE="${ENTRY_FILE#/}"
+          echo "   Entry: $ENTRY_RELATIVE"
           echo "   Composition: $COMPOSITION_ID"
           echo "   Props: $PROPS_PATH"
           
           npx remotion render \
-            "$ENTRY_FILE" \
+            "$ENTRY_RELATIVE" \
             "$COMPOSITION_ID" \
             out/video.mp4 \
             --props="$PROPS_PATH"
-        # FIX 4: removed --fps (not a valid CLI flag; FPS lives in <Composition>)
-        # FIX 5: removed --frames (duration lives in <Composition durationInFrames>)
-        # FIX 6: removed --browser-executable (ubuntu-latest auto-detects Chrome)
-        # FIX 7: quoted all variable expansions to prevent shell parsing issues
 
       - name: Upload to transfer.sh and callback
         run: |
