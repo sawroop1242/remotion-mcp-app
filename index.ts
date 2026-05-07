@@ -417,9 +417,13 @@ server.tool(
           inputs: {
             files: JSON.stringify(previous.files),
             entry_file: previous.entryFile ?? "/src/Video.tsx",
-            composition_id: previous.compositionId ?? "MyComposition",
-            duration_in_frames: String(previous.durationInFrames ?? 150),
-            fps: String(previous.fps ?? 30),
+            // FIX: use "Main" to match DEFAULT_META.compositionId in utils.ts
+            composition_id: previous.compositionId ?? "Main",
+            // FIX: forward merged props so the render matches the live preview
+            props: JSON.stringify({
+              ...previous.defaultProps,
+              ...previous.inputProps,
+            }),
             callback_url: callbackUrl,
             session_id: sessionId,
           },
