@@ -41,7 +41,7 @@ jobs:
 
       - name: Render MP4
         run: |
-          npx remotion render \
+          ./node_modules/.bin/remotion render \
             ${{ github.event.inputs.entry_file }} \
             out/video.mp4 \
             --frames=0-${{ github.event.inputs.duration_in_frames }} \
