@@ -11,12 +11,14 @@ on:
         default: '/src/Video.tsx'
       composition_id:
         description: 'Composition ID'
-        default: 'MyComposition'
+        # FIX 1: matches DEFAULT_META.compositionId in utils.ts
+        default: 'Main'
       duration_in_frames:
-        description: 'Frames'
+        description: 'Duration in frames'
         default: '150'
-      fps:
-        default: '30'
+      props:
+        description: 'JSON string of input props for the composition'
+        default: '{}'
       callback_url:
         description: 'MCP server callback URL'
         required: true
@@ -34,11 +36,10 @@ jobs:
         with:
           node-version: '20'
 
+      # FIX 2: single install — @remotion/cli and @remotion/renderer
+      # are now in package.json, so one "npm install" is enough.
       - name: Install Dependencies
         run: npm install
-
-      - name: Install Remotion CLI (pinned to repo version)
-        run: npm install --no-save remotion@4.0.268 @remotion/cli@4.0.268 @remotion/renderer@4.0.268
 
       - name: Write video source files
         run: node scripts/write-video-files.mjs
@@ -48,15 +49,20 @@ jobs:
       - name: Make output directory
         run: mkdir -p out
 
+      - name: Write props file
+        # FIX 3: persist inputProps/defaultProps so the render matches the preview
+        run: echo '${{ github.event.inputs.props }}' > input-props.json
+
       - name: Render MP4
         run: |
-          ./node_modules/.bin/remotion render \
+          npx remotion render \
             ${{ github.event.inputs.entry_file }} \
             ${{ github.event.inputs.composition_id }} \
             out/video.mp4 \
-            --frames=0-${{ github.event.inputs.duration_in_frames }} \
-            --fps=${{ github.event.inputs.fps }} \
-            --browser-executable=$(which google-chrome-stable || which google-chrome || which chromium-browser)
+            --props="./input-props.json"
+        # FIX 4: removed --fps (not a valid CLI flag; FPS lives in <Composition>)
+        # FIX 5: removed --frames (duration lives in <Composition durationInFrames>)
+        # FIX 6: removed --browser-executable (ubuntu-latest auto-detects Chrome)
 
       - name: Upload to transfer.sh and callback
         run: |
