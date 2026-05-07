@@ -9,6 +9,9 @@ on:
       entry_file:
         description: 'Entry file'
         default: '/src/Video.tsx'
+      composition_id:
+        description: 'Composition ID'
+        default: 'MyComposition'
       duration_in_frames:
         description: 'Frames'
         default: '150'
@@ -18,7 +21,7 @@ on:
         description: 'MCP server callback URL'
         required: true
       session_id:
-        description: 'Session ID to match response'
+        description: 'Session ID'
         required: true
 
 jobs:
@@ -34,8 +37,8 @@ jobs:
       - name: Install Dependencies
         run: npm install
 
-      - name: Install Remotion CLI
-        run: npm install --no-save remotion @remotion/cli @remotion/renderer
+      - name: Install Remotion CLI (pinned to repo version)
+        run: npm install --no-save remotion@4.0.268 @remotion/cli@4.0.268 @remotion/renderer@4.0.268
 
       - name: Write video source files
         run: node scripts/write-video-files.mjs
@@ -49,6 +52,7 @@ jobs:
         run: |
           ./node_modules/.bin/remotion render \
             ${{ github.event.inputs.entry_file }} \
+            ${{ github.event.inputs.composition_id }} \
             out/video.mp4 \
             --frames=0-${{ github.event.inputs.duration_in_frames }} \
             --fps=${{ github.event.inputs.fps }} \
