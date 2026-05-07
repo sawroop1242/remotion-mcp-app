@@ -53,20 +53,49 @@ jobs:
         # FIX 3: persist inputProps/defaultProps so the render matches the preview
         run: echo '${{ github.event.inputs.props }}' > input-props.json
 
-      - name: Render MP4
+      # 🔧 FIX: Added validation and properly quoted variables to prevent "No entry point" error
+      - name: Verify entry file exists
         run: |
+          ENTRY="${{ github.event.inputs.entry_file }}"
+          echo "🔍 Checking entry file: $ENTRY"
+          if [ ! -f "$ENTRY" ]; then
+            echo "❌ Entry file not found: $ENTRY"
+            echo "📁 Files in repo:"
+            find . -name "*.tsx" -o -name "*.ts" | head -20
+            exit 1
+          fi
+          echo "✅ Entry file found"
+
+      - name: Render MP4
+        env:
+          ENTRY_FILE: ${{ github.event.inputs.entry_file }}
+          COMPOSITION_ID: ${{ github.event.inputs.composition_id }}
+          PROPS_PATH: "./input-props.json"
+        run: |
+          echo "🎬 Starting Remotion render..."
+          echo "   Entry: $ENTRY_FILE"
+          echo "   Composition: $COMPOSITION_ID"
+          echo "   Props: $PROPS_PATH"
+          
           npx remotion render \
-            ${{ github.event.inputs.entry_file }} \
-            ${{ github.event.inputs.composition_id }} \
+            "$ENTRY_FILE" \
+            "$COMPOSITION_ID" \
             out/video.mp4 \
-            --props="./input-props.json"
+            --props="$PROPS_PATH"
         # FIX 4: removed --fps (not a valid CLI flag; FPS lives in <Composition>)
         # FIX 5: removed --frames (duration lives in <Composition durationInFrames>)
         # FIX 6: removed --browser-executable (ubuntu-latest auto-detects Chrome)
+        # FIX 7: quoted all variable expansions to prevent shell parsing issues
 
       - name: Upload to transfer.sh and callback
         run: |
+          echo "📤 Uploading video to transfer.sh..."
           URL=$(curl -s --upload-file out/video.mp4 https://transfer.sh/video.mp4)
+          echo "✅ Upload complete: $URL"
+          
+          echo "🔔 Sending callback to: ${{ github.event.inputs.callback_url }}"
           curl -s -X POST "${{ github.event.inputs.callback_url }}/render-complete" \
             -H "Content-Type: application/json" \
             -d "{\"session_id\": \"${{ github.event.inputs.session_id }}\", \"url\": \"$URL\"}"
+          
+          echo "✅ Callback sent successfully"
