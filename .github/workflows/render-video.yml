@@ -39,16 +39,14 @@ jobs:
         env:
           VIDEO_FILES: ${{ github.event.inputs.files }}
 
-      - name: Install Chrome for Remotion
-        run: npx remotion browser ensure
-
       - name: Render MP4
         run: |
           npx remotion render \
             ${{ github.event.inputs.entry_file }} \
             out/video.mp4 \
             --frames=0-${{ github.event.inputs.duration_in_frames }} \
-            --fps=${{ github.event.inputs.fps }}
+            --fps=${{ github.event.inputs.fps }} \
+            --browser-executable=$(which google-chrome-stable || which google-chrome || which chromium-browser)
 
       - name: Upload to transfer.sh and callback
         run: |
