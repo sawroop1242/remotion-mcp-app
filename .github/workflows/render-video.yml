@@ -35,6 +35,14 @@ jobs:
         with:
           node-version: '20'
 
+      - name: Create remotion config to ignore registerRoot warning
+        run: |
+          cat > remotion.config.ts << 'EOF'
+          import { Config } from "remotion";
+          
+          Config.setIgnoreRegisterRootWarning(true);
+          EOF
+
       - name: Install Dependencies
         run: npm install
 
