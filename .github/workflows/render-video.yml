@@ -8,7 +8,7 @@ on:
         required: true
       entry_file:
         description: 'Entry file'
-        default: '/src/Video.tsx'
+        default: 'src/Video.tsx'
       composition_id:
         description: 'Composition ID'
         # FIX 1: matches DEFAULT_META.compositionId in utils.ts
