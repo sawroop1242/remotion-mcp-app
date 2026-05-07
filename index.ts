@@ -417,6 +417,7 @@ server.tool(
           inputs: {
             files: JSON.stringify(previous.files),
             entry_file: previous.entryFile ?? "/src/Video.tsx",
+            composition_id: previous.compositionId ?? "MyComposition",
             duration_in_frames: String(previous.durationInFrames ?? 150),
             fps: String(previous.fps ?? 30),
             callback_url: callbackUrl,
