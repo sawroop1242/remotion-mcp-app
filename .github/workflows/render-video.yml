@@ -85,7 +85,8 @@ jobs:
             "$ENTRY_RELATIVE" \
             "$COMPOSITION_ID" \
             out/video.mp4 \
-            --props="$PROPS_PATH"
+            --props="$PROPS_PATH" \
+            --ignore-register-root-warning
 
       - name: Upload to transfer.sh and callback
         run: |
