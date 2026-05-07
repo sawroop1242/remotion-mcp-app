@@ -34,10 +34,16 @@ jobs:
       - name: Install Dependencies
         run: npm install
 
+      - name: Install Remotion CLI
+        run: npm install --no-save remotion @remotion/cli @remotion/renderer
+
       - name: Write video source files
         run: node scripts/write-video-files.mjs
         env:
           VIDEO_FILES: ${{ github.event.inputs.files }}
+
+      - name: Make output directory
+        run: mkdir -p out
 
       - name: Render MP4
         run: |
