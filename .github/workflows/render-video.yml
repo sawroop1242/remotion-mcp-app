@@ -35,14 +35,6 @@ jobs:
         with:
           node-version: '20'
 
-      - name: Create remotion config to ignore registerRoot warning
-        run: |
-          cat > remotion.config.ts << 'EOF'
-          import { Config } from "@remotion/cli/config";
-          
-          Config.setIgnoreRegisterRootWarning(true);
-          EOF
-
       - name: Install Dependencies
         run: npm install
 
@@ -57,44 +49,70 @@ jobs:
       - name: Write props file
         run: echo '${{ github.event.inputs.props }}' > input-props.json
 
-      # 🔧 FIX: Convert absolute paths to relative paths
+      # Create index.tsx with registerRoot wrapper if not provided
+      - name: Create registerRoot wrapper
+        run: |
+          # Convert absolute path to relative path
+          ENTRY_FILE="${{ github.event.inputs.entry_file }}"
+          ENTRY_RELATIVE="${ENTRY_FILE#/}"
+          
+          echo "📝 Original entry file: $ENTRY_FILE"
+          echo "📝 Relative path: $ENTRY_RELATIVE"
+          
+          # Check if entry file is Video.tsx (not index.tsx)
+          if [[ "$ENTRY_RELATIVE" == "src/Video.tsx" ]]; then
+            echo "🔧 Creating src/index.tsx with registerRoot wrapper..."
+            mkdir -p src
+            cat > src/index.tsx << 'WRAPPER'
+          import { registerRoot } from 'remotion';
+          import Video from './Video';
+          
+          registerRoot(Video);
+          WRAPPER
+            echo "✅ Created src/index.tsx with registerRoot"
+          else
+            echo "✅ Using provided entry file: $ENTRY_RELATIVE"
+          fi
+
+      # Verify entry file exists
       - name: Verify entry file exists
         run: |
-          ENTRY="${{ github.event.inputs.entry_file }}"
-          echo "🔍 Checking entry file: $ENTRY"
+          ENTRY_FILE="${{ github.event.inputs.entry_file }}"
+          ENTRY_RELATIVE="${ENTRY_FILE#/}"
           
-          # Convert absolute path (/src/Video.tsx) to relative path (src/Video.tsx)
-          ENTRY_RELATIVE="${ENTRY#/}"
-          echo "📝 Relative path: $ENTRY_RELATIVE"
+          # If original was Video.tsx, use index.tsx instead
+          if [[ "$ENTRY_RELATIVE" == "src/Video.tsx" ]]; then
+            ENTRY_RELATIVE="src/index.tsx"
+          fi
+          
+          echo "🔍 Checking entry file: $ENTRY_RELATIVE"
           
           if [ ! -f "$ENTRY_RELATIVE" ]; then
             echo "❌ Entry file not found: $ENTRY_RELATIVE"
-            echo "📁 Files in repo:"
-            find . -name "*.tsx" -o -name "*.ts" | grep -v node_modules | head -20
+            echo "📁 Available files:"
+            find src -name "*.tsx" -o -name "*.ts" 2>/dev/null | head -10
             exit 1
           fi
           echo "✅ Entry file found: $ENTRY_RELATIVE"
+          
+          # Save for next step
+          echo "ENTRY_FINAL=$ENTRY_RELATIVE" >> $GITHUB_ENV
 
       - name: Render MP4
         env:
-          ENTRY_FILE: ${{ github.event.inputs.entry_file }}
           COMPOSITION_ID: ${{ github.event.inputs.composition_id }}
           PROPS_PATH: "./input-props.json"
         run: |
           echo "🎬 Starting Remotion render..."
-          
-          # Convert absolute path to relative path
-          ENTRY_RELATIVE="${ENTRY_FILE#/}"
-          echo "   Entry: $ENTRY_RELATIVE"
+          echo "   Entry: $ENTRY_FINAL"
           echo "   Composition: $COMPOSITION_ID"
           echo "   Props: $PROPS_PATH"
           
           npx remotion render \
-            "$ENTRY_RELATIVE" \
+            "$ENTRY_FINAL" \
             "$COMPOSITION_ID" \
             out/video.mp4 \
-            --props="$PROPS_PATH" \
-            --ignore-register-root-warning
+            --props="$PROPS_PATH"
 
       - name: Upload to transfer.sh and callback
         run: |
