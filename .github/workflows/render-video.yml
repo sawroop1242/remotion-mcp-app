@@ -38,7 +38,7 @@ jobs:
       - name: Create remotion config to ignore registerRoot warning
         run: |
           cat > remotion.config.ts << 'EOF'
-          import { Config } from "remotion";
+          import { Config } from "@remotion/cli/config";
           
           Config.setIgnoreRegisterRootWarning(true);
           EOF
