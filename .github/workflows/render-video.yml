@@ -71,7 +71,7 @@ jobs:
             mkdir -p src
             cat > src/index.tsx << WRAPPER
           import { registerRoot, Composition } from 'remotion';
-          import { Video } from './Video';
+          import Video from './Video';
 
           function Root() {
             return (
