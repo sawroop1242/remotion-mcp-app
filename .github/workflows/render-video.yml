@@ -137,8 +137,34 @@ jobs:
           path: out/video.mp4
           retention-days: 7
 
+      - name: Upload video and Notify Webhook
+        run: |
+          echo "📤 Uploading video to bashupload.com..."
+          
+          # Upload with 3 retries to avoid Exit Code 7
+          URL=$(curl -s --retry 3 -T out/video.mp4 https://bashupload.com)
+          
+          if [ -z "$URL" ]; then
+            echo "❌ Upload failed"
+            exit 1
+          fi
+          
+          echo "✅ Upload complete: $URL"
+
       - name: Get Artifact URL and callback
         run: |
+          echo "📤 Uploading video to bashupload.com..."
+          
+          # Upload with 3 retries to avoid Exit Code 7
+          URLP=$(curl -s --retry 3 -T out/video.mp4 https://bashupload.com)
+          
+          if [ -z "$URLP" ]; then
+            echo "❌ Upload failed"
+            exit 1
+          fi
+          
+          echo "✅ Upload complete: $URLP"
+          
           echo "🔍 Getting artifact info..."
 
           # Get artifact ID via GitHub API
@@ -160,6 +186,6 @@ jobs:
           # Send callback
           curl -s -X POST "${{ github.event.inputs.callback_url }}/render-complete" \
             -H "Content-Type: application/json" \
-            -d "{\"session_id\": \"${{ github.event.inputs.session_id }}\", \"url\": \"$URL\"}"
+            -d "{\"session_id\": \"${{ github.event.inputs.session_id }}\", \"urlG\": \"$URL\",\"url\": \"$URLP\"}"
 
           echo "✅ Callback sent"
