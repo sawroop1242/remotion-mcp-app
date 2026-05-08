@@ -129,22 +129,37 @@ jobs:
             "$COMPOSITION_ID" \
             out/video.mp4 \
             --props="$PROPS_PATH"
-      - name: Upload artifact to GitHub
+            
+      - name: Upload GitHub Artifact
         uses: actions/upload-artifact@v4
         with:
           name: rendered-video
           path: out/video.mp4
-          retention-days: 7    
+          retention-days: 7
 
-      - name: Upload to transfer.sh and callback
+      - name: Get Artifact URL and callback
         run: |
-          echo "📤 Uploading video to transfer.sh..."
-          URL=$(curl -s --upload-file out/video.mp4 https://transfer.sh/video.mp4)
-          echo "✅ Upload complete: $URL"
+          echo "🔍 Getting artifact info..."
 
-          echo "🔔 Sending callback to: ${{ github.event.inputs.callback_url }}"
+          # Get artifact ID via GitHub API
+          ARTIFACT=$(curl -s \
+            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
+            -H "Accept: application/vnd.github+json" \
+            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts")
+
+          ARTIFACT_ID=$(echo $ARTIFACT | python3 -c "
+          import sys, json
+          data = json.load(sys.stdin)
+          print(data['artifacts'][0]['id'])
+          ")
+
+          # Construct artifact URL
+          URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts/$ARTIFACT_ID"
+          echo "✅ Artifact URL: $URL"
+
+          # Send callback
           curl -s -X POST "${{ github.event.inputs.callback_url }}/render-complete" \
             -H "Content-Type: application/json" \
             -d "{\"session_id\": \"${{ github.event.inputs.session_id }}\", \"url\": \"$URL\"}"
 
-          echo "✅ Callback sent successfully"
+          echo "✅ Callback sent"
