@@ -15,6 +15,15 @@ on:
       duration_in_frames:
         description: 'Duration in frames'
         default: '150'
+      fps:
+        description: 'Frames per second'
+        default: '30'
+      width:
+        description: 'Video width'
+        default: '1920'
+      height:
+        description: 'Video height'
+        default: '1080'
       props:
         description: 'JSON string of input props for the composition'
         default: '{}'
@@ -49,44 +58,52 @@ jobs:
       - name: Write props file
         run: echo '${{ github.event.inputs.props }}' > input-props.json
 
-      # Create index.tsx with registerRoot wrapper if not provided
       - name: Create registerRoot wrapper
         run: |
-          # Convert absolute path to relative path
           ENTRY_FILE="${{ github.event.inputs.entry_file }}"
           ENTRY_RELATIVE="${ENTRY_FILE#/}"
-          
+
           echo "📝 Original entry file: $ENTRY_FILE"
           echo "📝 Relative path: $ENTRY_RELATIVE"
-          
-          # Check if entry file is Video.tsx (not index.tsx)
+
           if [[ "$ENTRY_RELATIVE" == "src/Video.tsx" ]]; then
             echo "🔧 Creating src/index.tsx with registerRoot wrapper..."
             mkdir -p src
-            cat > src/index.tsx << 'WRAPPER'
-          import { registerRoot } from 'remotion';
-          import Video from './Video';
-          
-          registerRoot(Video);
+            cat > src/index.tsx << WRAPPER
+          import { registerRoot, Composition } from 'remotion';
+          import { Video } from './Video';
+
+          function Root() {
+            return (
+              <Composition
+                id="${{ github.event.inputs.composition_id }}"
+                component={Video}
+                durationInFrames={${{ github.event.inputs.duration_in_frames }}}
+                fps={${{ github.event.inputs.fps }}}
+                width={${{ github.event.inputs.width }}}
+                height={${{ github.event.inputs.height }}}
+              />
+            );
+          }
+
+          registerRoot(Root);
           WRAPPER
             echo "✅ Created src/index.tsx with registerRoot"
           else
             echo "✅ Using provided entry file: $ENTRY_RELATIVE"
           fi
 
-      # Verify entry file exists
       - name: Verify entry file exists
         run: |
           ENTRY_FILE="${{ github.event.inputs.entry_file }}"
           ENTRY_RELATIVE="${ENTRY_FILE#/}"
-          
-          # If original was Video.tsx, use index.tsx instead
+
           if [[ "$ENTRY_RELATIVE" == "src/Video.tsx" ]]; then
             ENTRY_RELATIVE="src/index.tsx"
           fi
-          
+
           echo "🔍 Checking entry file: $ENTRY_RELATIVE"
-          
+
           if [ ! -f "$ENTRY_RELATIVE" ]; then
             echo "❌ Entry file not found: $ENTRY_RELATIVE"
             echo "📁 Available files:"
@@ -94,8 +111,7 @@ jobs:
             exit 1
           fi
           echo "✅ Entry file found: $ENTRY_RELATIVE"
-          
-          # Save for next step
+
           echo "ENTRY_FINAL=$ENTRY_RELATIVE" >> $GITHUB_ENV
 
       - name: Render MP4
@@ -107,7 +123,7 @@ jobs:
           echo "   Entry: $ENTRY_FINAL"
           echo "   Composition: $COMPOSITION_ID"
           echo "   Props: $PROPS_PATH"
-          
+
           npx remotion render \
             "$ENTRY_FINAL" \
             "$COMPOSITION_ID" \
@@ -119,10 +135,10 @@ jobs:
           echo "📤 Uploading video to transfer.sh..."
           URL=$(curl -s --upload-file out/video.mp4 https://transfer.sh/video.mp4)
           echo "✅ Upload complete: $URL"
-          
+
           echo "🔔 Sending callback to: ${{ github.event.inputs.callback_url }}"
           curl -s -X POST "${{ github.event.inputs.callback_url }}/render-complete" \
             -H "Content-Type: application/json" \
             -d "{\"session_id\": \"${{ github.event.inputs.session_id }}\", \"url\": \"$URL\"}"
-          
+
           echo "✅ Callback sent successfully"
