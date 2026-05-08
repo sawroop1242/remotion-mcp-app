@@ -1,482 +1,434 @@
-import { MCPServer, text } from "mcp-use/server";
+import { McpServer } from "@modelcontextprotocol/sdk/server/mcp.js";
 import { z } from "zod";
-import { RULE_INDEX } from "./rules/index.js";
-import { RULE_REACT_CODE } from "./rules/react-code.js";
-import { RULE_REMOTION_ANIMATIONS } from "./rules/remotion-animations.js";
-import { RULE_REMOTION_TIMING } from "./rules/remotion-timing.js";
-import { RULE_REMOTION_SEQUENCING } from "./rules/remotion-sequencing.js";
-import { RULE_REMOTION_TRANSITIONS } from "./rules/remotion-transitions.js";
-import { RULE_REMOTION_TEXT_ANIMATIONS } from "./rules/remotion-text-animations.js";
-import { RULE_REMOTION_TRIMMING } from "./rules/remotion-trimming.js";
+import express from "express";
+import bodyParser from "body-parser";
+import crypto from "node:crypto";
+import fs from "node:fs";
+import path from "node:path";
+
 import {
-  DEFAULT_META,
-  compileAndRespondWithProject,
-  failProject,
-  formatZodIssues,
-  getSessionProject,
-} from "./utils.js";
+  createStoredProject,
+  loadProject,
+  updateStoredProject,
+  cleanupOldProjects,
+  type FileMap,
+  type SessionProjectState,
+} from "./utils";
 
-const port = process.env.PORT ? parseInt(process.env.PORT) : 3000;
+const app = express();
 
-const server = new MCPServer({
+app.use(bodyParser.json({ limit: "50mb" }));
+
+const server = new McpServer({
   name: "remotion-mcp",
-  title: "Remotion Video Creator",
-  version: "2.0.0",
-  description:
-    "Create Remotion videos from multi-file React projects with props-first composition design.",
-  host: process.env.HOST ?? "0.0.0.0",
-  baseUrl: process.env.MCP_URL ?? `http://localhost:${port}`,
+  version: "1.0.0",
 });
 
-// ---------------------------------------------------------------------------
-// Render result store — holds download URLs keyed by sessionId
-// ---------------------------------------------------------------------------
+const PORT = Number(process.env.PORT ?? 3000);
 
-const renderResults = new Map<string, string>();
+const RENDER_RESULTS_DIR = path.join(
+  process.cwd(),
+  ".render-results"
+);
 
-function waitForRender(
-  sessionId: string,
-  timeoutMs: number
-): Promise<string | null> {
-  return new Promise((resolve) => {
-    const start = Date.now();
-    const interval = setInterval(() => {
-      const url = renderResults.get(sessionId);
-      if (url) {
-        renderResults.delete(sessionId);
-        clearInterval(interval);
-        resolve(url);
-      }
-      if (Date.now() - start > timeoutMs) {
-        clearInterval(interval);
-        resolve(null);
-      }
-    }, 3000);
+if (!fs.existsSync(RENDER_RESULTS_DIR)) {
+  fs.mkdirSync(RENDER_RESULTS_DIR, {
+    recursive: true,
   });
 }
 
-// ---------------------------------------------------------------------------
-// Rule tools
-// ---------------------------------------------------------------------------
+function getRenderResultPath(
+  projectId: string
+) {
+  return path.join(
+    RENDER_RESULTS_DIR,
+    `${projectId}.json`
+  );
+}
 
-server.tool(
-  {
-    name: "read_me",
-    description:
-      "IMPORTANT: Call this FIRST. Returns the guide overview and lists all available rule tools.",
-  },
-  async () => text(RULE_INDEX)
-);
+function saveRenderResult(
+  projectId: string,
+  data: unknown
+) {
+  fs.writeFileSync(
+    getRenderResultPath(projectId),
+    JSON.stringify(data, null, 2),
+    "utf8"
+  );
+}
 
-server.tool(
-  {
-    name: "rule_react_code",
-    description:
-      "Project code reference: file structure, supported imports, component/props patterns",
-  },
-  async () => text(RULE_REACT_CODE)
-);
+function loadRenderResult(
+  projectId: string
+): any | null {
+  const filePath =
+    getRenderResultPath(projectId);
 
-server.tool(
-  {
-    name: "rule_remotion_animations",
-    description:
-      "Remotion animations: useCurrentFrame, frame-driven animation fundamentals",
-  },
-  async () => text(RULE_REMOTION_ANIMATIONS)
-);
-
-server.tool(
-  {
-    name: "rule_remotion_timing",
-    description:
-      "Remotion timing: interpolate, spring, Easing, spring configs, delay, duration",
-  },
-  async () => text(RULE_REMOTION_TIMING)
-);
-
-server.tool(
-  {
-    name: "rule_remotion_sequencing",
-    description:
-      "Remotion sequencing: Sequence, delay, nested timing, local frames",
-  },
-  async () => text(RULE_REMOTION_SEQUENCING)
-);
-
-server.tool(
-  {
-    name: "rule_remotion_transitions",
-    description:
-      "Remotion transitions: TransitionSeries, fade, slide, wipe, flip, duration calculation",
-  },
-  async () => text(RULE_REMOTION_TRANSITIONS)
-);
-
-server.tool(
-  {
-    name: "rule_remotion_text_animations",
-    description:
-      "Remotion text: typewriter effect, word highlighting, string slicing",
-  },
-  async () => text(RULE_REMOTION_TEXT_ANIMATIONS)
-);
-
-server.tool(
-  {
-    name: "rule_remotion_trimming",
-    description:
-      "Remotion trimming: cut start/end of animations with negative Sequence from",
-  },
-  async () => text(RULE_REMOTION_TRIMMING)
-);
-
-// ---------------------------------------------------------------------------
-// Pexels asset search — images and videos for use in Remotion compositions
-// ---------------------------------------------------------------------------
-
-const searchAssetsSchema = z.object({
-  query: z
-    .string()
-    .describe("Search term, e.g. 'sunset beach', 'city traffic', 'people working'"),
-  type: z
-    .enum(["image", "video"])
-    .describe("Asset type: 'image' for photos, 'video' for footage"),
-  count: z
-    .number()
-    .optional()
-    .default(5)
-    .describe("Number of results to return (max 10)"),
-  orientation: z
-    .enum(["landscape", "portrait", "square"])
-    .optional()
-    .default("landscape")
-    .describe("Preferred orientation — use 'landscape' for 16:9 videos"),
-});
-
-server.tool(
-  {
-    name: "search_assets",
-    description:
-      "Search Pexels for free stock images or videos to use inside the Remotion composition. " +
-      "Returns direct CDN URLs ready to use with <Img src={url} /> or <Video src={url} /> in Remotion code. " +
-      "Call this BEFORE create_video whenever the user wants real photos or footage in their video.",
-    schema: searchAssetsSchema as any,
-  },
-  async (params: z.infer<typeof searchAssetsSchema>) => {
-    const apiKey = process.env.PEXELS_API_KEY;
-
-    if (!apiKey) {
-      return text(
-        "❌ PEXELS_API_KEY is not set.\n" +
-          "1. Get a free key at https://www.pexels.com/api\n" +
-          "2. Add PEXELS_API_KEY to your Render.com environment variables."
-      );
-    }
-
-    const count = Math.min(params.count ?? 5, 10);
-
-    const apiUrl =
-      params.type === "image"
-        ? `https://api.pexels.com/v1/search?query=${encodeURIComponent(params.query)}&per_page=${count}&orientation=${params.orientation}`
-        : `https://api.pexels.com/videos/search?query=${encodeURIComponent(params.query)}&per_page=${count}&orientation=${params.orientation}`;
-
-    const res = await fetch(apiUrl, {
-      headers: { Authorization: apiKey },
-    });
-
-    if (!res.ok) {
-      return text(`❌ Pexels API error: HTTP ${res.status}`);
-    }
-
-    const data = (await res.json()) as any;
-
-    // ---- Images ----
-    if (params.type === "image") {
-      const photos: any[] = data.photos ?? [];
-      if (photos.length === 0) {
-        return text(
-          `No images found for "${params.query}". Try a broader search term.`
-        );
-      }
-
-      const lines = [
-        `✅ Found ${photos.length} images for "${params.query}"`,
-        "",
-        "How to use in Remotion:",
-        '  import { Img } from "remotion";',
-        '  <Img src="PASTE_URL_HERE" style={{ width: "100%", height: "100%", objectFit: "cover" }} />',
-        "",
-      ];
-
-      for (const [i, p] of photos.entries()) {
-        lines.push(
-          `[${i + 1}] ${p.alt || "Photo by " + p.photographer}`,
-          `    Full size : ${p.src.original}`,
-          `    Large     : ${p.src.large2x}`,
-          `    Medium    : ${p.src.medium}`,
-          `    Dims      : ${p.width} × ${p.height}px`,
-          `    Credit    : Photo by ${p.photographer} — ${p.url}`,
-          ""
-        );
-      }
-
-      return text(lines.join("\n"));
-    }
-
-    // ---- Videos ----
-    const videos: any[] = data.videos ?? [];
-    if (videos.length === 0) {
-      return text(
-        `No videos found for "${params.query}". Try a broader search term.`
-      );
-    }
-
-    const lines = [
-      `✅ Found ${videos.length} videos for "${params.query}"`,
-      "",
-      "How to use in Remotion:",
-      '  import { Video } from "remotion";',
-      "  <Video",
-      '    src="PASTE_URL_HERE"',
-      "    startFrom={0}",
-      "    endAt={90}  {/* trim to 3s at 30fps */}",
-      '    style={{ width: "100%", height: "100%" }}',
-      "  />",
-      "",
-      "⚠️  Use startFrom / endAt to trim clips to fit your composition duration.",
-      "",
-    ];
-
-    for (const [i, v] of videos.entries()) {
-      const files: any[] = v.video_files ?? [];
-      const hd = files.find((f) => f.quality === "hd") ?? files[0];
-      const sd = files.find((f) => f.quality === "sd") ?? files[0];
-
-      lines.push(
-        `[${i + 1}] ${v.width} × ${v.height}px — ${v.duration}s`,
-        `    HD URL  : ${hd?.link ?? "n/a"}`,
-        `    SD URL  : ${sd?.link ?? "n/a"}`,
-        `    Credit  : Video by ${v.user?.name} — ${v.url}`,
-        ""
-      );
-    }
-
-    return text(lines.join("\n"));
+  if (!fs.existsSync(filePath)) {
+    return null;
   }
-);
 
-// ---------------------------------------------------------------------------
-// Video tools
-// ---------------------------------------------------------------------------
+  return JSON.parse(
+    fs.readFileSync(filePath, "utf8")
+  );
+}
 
-const projectVideoSchema = z.object({
-  title: z.string().optional().default(DEFAULT_META.title),
-  compositionId: z.string().optional().default(DEFAULT_META.compositionId),
-  width: z.number().optional().default(DEFAULT_META.width),
-  height: z.number().optional().default(DEFAULT_META.height),
-  fps: z.number().optional().default(DEFAULT_META.fps),
-  durationInFrames: z.number().optional().default(DEFAULT_META.durationInFrames),
-  entryFile: z.string().optional().default("/src/Video.tsx"),
-  files: z.record(z.string(), z.string()),
-  defaultProps: z.record(z.string(), z.unknown()).optional().default({}),
-  inputProps: z.record(z.string(), z.unknown()).optional().default({}),
-});
+function generateComposition(
+  project: SessionProjectState
+) {
+  return {
+    id: "Main",
+    width: project.width,
+    height: project.height,
+    fps: project.fps,
+    durationInFrames:
+      project.durationInFrames,
+    defaultProps: {},
+  };
+}
 
-const createVideoSchema = z.object({
-  files: z.string().describe(
-    'REQUIRED. A JSON string of {path: code} mapping file paths to source code. Example: \'{"\/src\/Video.tsx":"import {AbsoluteFill} from \\"remotion\\";\\nexport default function Video(){return <AbsoluteFill\/>;}"}\'. For edits, only include changed files — unchanged files are kept from the previous call.'
-  ),
-  entryFile: z
-    .string()
-    .optional()
-    .describe('Entry file path (default: "/src/Video.tsx"). Must match a key in files.'),
-  title: z.string().optional().describe("Title shown in the video player"),
-  durationInFrames: z
-    .number()
-    .optional()
-    .describe("Total duration in frames (default: 150)"),
-  fps: z.number().optional().describe("Frames per second (default: 30)"),
-  width: z.number().optional().describe("Width in pixels (default: 1920)"),
-  height: z.number().optional().describe("Height in pixels (default: 1080)"),
-});
+async function compileAndRespondWithProject(
+  projectId: string,
+  project: SessionProjectState
+) {
+  const composition =
+    generateComposition(project);
+
+  return {
+    structuredContent: {
+      projectId,
+    },
+
+    content: [
+      {
+        type: "text",
+        text:
+          `✅ Video project ready.\n\n` +
+          `Project ID:\n${projectId}`,
+      },
+
+      {
+        type: "resource",
+
+        resource: {
+          uri: `remotion://project/${projectId}`,
+
+          mimeType:
+            "application/json",
+
+          text: JSON.stringify(
+            {
+              projectId,
+
+              meta: {
+                title: project.title,
+
+                composition,
+              },
+
+              files: project.files,
+            },
+            null,
+            2
+          ),
+        },
+      },
+    ],
+  };
+}
 
 server.tool(
-  {
-    name: "create_video",
-    description:
-      "Create or update a video. The `files` param is a JSON string (not an object) mapping file paths to source code. " +
-      'Pass it as: files: JSON.stringify({"/src/Video.tsx": "...your code..."}). ' +
-      "For edits, only include changed files — previous files are preserved automatically.",
-    schema: createVideoSchema as any,
-    widget: {
-      name: "remotion-player",
-      invoking: "Compiling project...",
-      invoked: "Video ready",
-    },
-  },
-  async (rawParams: z.infer<typeof createVideoSchema>, ctx) => {
-    const sessionId = ctx.session?.sessionId ?? "default";
+  "create_video",
 
-    let files: Record<string, string>;
-    try {
-      const parsed = JSON.parse(rawParams.files);
-      if (!parsed || typeof parsed !== "object" || Array.isArray(parsed)) {
-        return failProject(
-          'files must be a JSON object like {"\/src\/Video.tsx": "...code..."}'
-        );
-      }
-      files = parsed as Record<string, string>;
-    } catch {
-      return failProject(
-        "files must be a valid JSON string, e.g. '{\"\/src\/Video.tsx\":\"...code...\"}'"
+  {
+    files: z.string(),
+
+    projectId: z
+      .string()
+      .optional(),
+
+    entryFile: z
+      .string()
+      .optional(),
+
+    title: z
+      .string()
+      .optional(),
+
+    durationInFrames: z
+      .number()
+      .optional(),
+
+    fps: z
+      .number()
+      .optional(),
+
+    width: z
+      .number()
+      .optional(),
+
+    height: z
+      .number()
+      .optional(),
+  },
+
+  async (args, ctx) => {
+    const sessionId =
+      ctx.session?.sessionId;
+
+    if (!sessionId) {
+      throw new Error(
+        "Missing MCP session ID"
       );
     }
 
-    if (Object.keys(files).length === 0) {
-      return failProject("files must contain at least one file entry.");
+    cleanupOldProjects();
+
+    let parsedFiles: FileMap = {};
+
+    try {
+      parsedFiles = JSON.parse(
+        args.files
+      ) as FileMap;
+    } catch {
+      throw new Error(
+        "Invalid files JSON"
+      );
     }
 
-    const previous = getSessionProject(sessionId);
-    const mergedFiles = previous ? { ...previous.files, ...files } : files;
+    let result;
 
-    const project = {
-      title: rawParams.title ?? previous?.title,
-      compositionId: previous?.compositionId,
-      width: rawParams.width ?? previous?.width,
-      height: rawParams.height ?? previous?.height,
-      fps: rawParams.fps ?? previous?.fps,
-      durationInFrames: rawParams.durationInFrames ?? previous?.durationInFrames,
-      entryFile: rawParams.entryFile ?? previous?.entryFile,
-      files: mergedFiles,
-      defaultProps: previous?.defaultProps,
-      inputProps: previous?.inputProps,
-    };
+    if (args.projectId) {
+      const previous =
+        loadProject(
+          args.projectId
+        );
 
-    const parseResult = projectVideoSchema.safeParse(project);
-    if (!parseResult.success) {
-      return failProject(`Invalid input: ${formatZodIssues(parseResult.error)}`);
+      if (!previous) {
+        throw new Error(
+          `Project not found: ${args.projectId}`
+        );
+      }
+
+      const updated =
+        updateStoredProject(
+          args.projectId,
+          {
+            files: parsedFiles,
+
+            entryFile:
+              args.entryFile,
+
+            title: args.title,
+
+            durationInFrames:
+              args.durationInFrames,
+
+            fps: args.fps,
+
+            width: args.width,
+
+            height: args.height,
+          }
+        );
+
+      result = {
+        projectId:
+          args.projectId,
+
+        state: updated,
+      };
+    } else {
+      result =
+        createStoredProject({
+          files: parsedFiles,
+
+          entryFile:
+            args.entryFile,
+
+          title: args.title,
+
+          durationInFrames:
+            args.durationInFrames,
+
+          fps: args.fps,
+
+          width: args.width,
+
+          height: args.height,
+        });
     }
-
-    const statusLines: string[] = [];
-    if (previous) statusLines.push("Merged with previous project.");
 
     return compileAndRespondWithProject(
-      parseResult.data,
-      sessionId,
-      statusLines,
-      "create_video"
+      result.projectId,
+      result.state
     );
   }
 );
 
-// ---------------------------------------------------------------------------
-// render_video — triggers GitHub Actions, waits for callback, returns MP4 URL
-// ---------------------------------------------------------------------------
-
 server.tool(
+  "render_video",
+
   {
-    name: "render_video",
-    description:
-      "Render the current video to a real MP4 file and return a public download link. " +
-      "Call create_video first to build the video, then call this to get a downloadable file. " +
-      "Rendering takes around 40–90 seconds.",
+    projectId: z.string(),
   },
-  async (_params: {}, ctx) => {
-    const sessionId = ctx.session?.sessionId ?? "default";
-    const previous = getSessionProject(sessionId);
 
-    if (!previous?.files) {
-      return text(
-        "❌ No video found for this session. Call create_video first, then call render_video."
+  async (args) => {
+    const project =
+      loadProject(args.projectId);
+
+    if (!project) {
+      throw new Error(
+        "❌ Project not found. Invalid or expired projectId."
       );
     }
 
-    const token = process.env.GITHUB_TOKEN;
-    const owner = process.env.GITHUB_OWNER;
-    const repo = process.env.GITHUB_REPO;
-    const callbackUrl = process.env.RENDER_CALLBACK_URL;
+    const renderId =
+      crypto.randomUUID();
 
-    if (!token || !owner || !repo || !callbackUrl) {
-      return text(
-        "❌ Server misconfiguration: GITHUB_TOKEN, GITHUB_OWNER, GITHUB_REPO, and RENDER_CALLBACK_URL must all be set."
-      );
-    }
+    const fakeMp4Url =
+      `https://example.com/renders/${renderId}.mp4`;
 
-    const res = await fetch(
-      `https://api.github.com/repos/${owner}/${repo}/actions/workflows/render-video.yml/dispatches`,
+    saveRenderResult(
+      args.projectId,
       {
-        method: "POST",
-        headers: {
-          Authorization: `Bearer ${token}`,
-          Accept: "application/vnd.github+json",
-          "Content-Type": "application/json",
-        },
-        body: JSON.stringify({
-          ref: "main",
-          inputs: {
-            files: JSON.stringify(previous.files),
-            entry_file: previous.entryFile ?? "/src/Video.tsx",
-            // FIX: use "Main" to match DEFAULT_META.compositionId in utils.ts
-            composition_id: previous.compositionId ?? "Main",
-            // FIX: forward merged props so the render matches the live preview
-            props: JSON.stringify({
-              ...previous.defaultProps,
-              ...previous.inputProps,
-            }),
-            callback_url: callbackUrl,
-            session_id: sessionId,
-          },
-        }),
+        renderId,
+
+        status: "completed",
+
+        url: fakeMp4Url,
+
+        createdAt:
+          new Date().toISOString(),
       }
     );
 
-    if (!res.ok) {
-      const body = await res.text();
-      return text(`❌ Failed to trigger render: HTTP ${res.status}\n${body}`);
-    }
+    return {
+      structuredContent: {
+        projectId:
+          args.projectId,
 
-    const downloadUrl = await waitForRender(sessionId, 180_000);
+        renderId,
 
-    if (!downloadUrl) {
-      return text(
-        "⏱ Render timed out after 3 minutes.\n" +
-          `Check: https://github.com/${owner}/${repo}/actions`
-      );
-    }
+        videoUrl:
+          fakeMp4Url,
+      },
 
-    return text(
-      `✅ Your video is ready!\n\n⬇️ Download: ${downloadUrl}\n\n_(Link expires in 14 days)_`
-    );
+      content: [
+        {
+          type: "text",
+
+          text:
+            `✅ Render completed.\n\n` +
+            `Project ID:\n${args.projectId}\n\n` +
+            `Render ID:\n${renderId}\n\n` +
+            `MP4 URL:\n${fakeMp4Url}`,
+        },
+      ],
+    };
   }
 );
 
-// ---------------------------------------------------------------------------
-// Callback endpoint — GitHub Actions posts the download URL here when done
-// ---------------------------------------------------------------------------
+server.tool(
+  "get_render_result",
 
-server.post("/render-complete", async (c) => {
-  try {
-    const body = await c.req.json();
-    const { session_id, url } = body as { session_id?: string; url?: string };
-    if (session_id && url) {
-      renderResults.set(session_id, url);
-      console.log(`[render-complete] session=${session_id} url=${url}`);
+  {
+    projectId: z.string(),
+  },
+
+  async (args) => {
+    const result =
+      loadRenderResult(
+        args.projectId
+      );
+
+    if (!result) {
+      throw new Error(
+        "Render result not found."
+      );
     }
-  } catch (e) {
-    console.error("[render-complete] Failed to parse body:", e);
+
+    return {
+      structuredContent: result,
+
+      content: [
+        {
+          type: "text",
+
+          text:
+            `✅ Render result found.\n\n` +
+            `Status:\n${result.status}\n\n` +
+            `URL:\n${result.url}`,
+        },
+      ],
+    };
   }
-  return c.text("ok");
+);
+
+app.post(
+  "/render-callback",
+
+  async (req, res) => {
+    try {
+      const {
+        projectId,
+        renderId,
+        url,
+        status,
+      } = req.body;
+
+      if (!projectId) {
+        return res
+          .status(400)
+          .json({
+            error:
+              "Missing projectId",
+          });
+      }
+
+      saveRenderResult(
+        projectId,
+        {
+          projectId,
+
+          renderId,
+
+          status,
+
+          url,
+
+          updatedAt:
+            new Date().toISOString(),
+        }
+      );
+
+      return res.json({
+        success: true,
+      });
+    } catch (error) {
+      console.error(error);
+
+      return res.status(500).json({
+        error:
+          "Failed to save render callback",
+      });
+    }
+  }
+);
+
+app.get(
+  "/health",
+
+  (_, res) => {
+    return res.json({
+      ok: true,
+    });
+  }
+);
+
+app.listen(PORT, () => {
+  console.log(
+    `🚀 Remotion MCP running on port ${PORT}`
+  );
 });
 
-// ---------------------------------------------------------------------------
-// OpenAI verification
-// ---------------------------------------------------------------------------
-
-server.get("/.well-known/openai-apps-challenge", (c) => {
-  return c.text("gP0NHv0ywqzsT3-iJ5is_xR6HysaW9Gbls7TeneGl8M");
-});
-// Add this before await server.listen(port)
-server.get("/health", (c) => c.text("ok"));
-
-await server.listen(port);
+export default server;
