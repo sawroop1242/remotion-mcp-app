@@ -3,189 +3,95 @@ name: Render Remotion Video
 on:
   workflow_dispatch:
     inputs:
-      files:
-        description: 'JSON string of video source files'
+      project_id:
+        description: "Persistent project ID"
         required: true
-      entry_file:
-        description: 'Entry file'
-        default: '/src/Video.tsx'
-      composition_id:
-        description: 'Composition ID'
-        default: 'Main'
-      duration_in_frames:
-        description: 'Duration in frames'
-        default: '150'
-      fps:
-        description: 'Frames per second'
-        default: '30'
-      width:
-        description: 'Video width'
-        default: '1920'
-      height:
-        description: 'Video height'
-        default: '1080'
-      props:
-        description: 'JSON string of input props for the composition'
-        default: '{}'
-      callback_url:
-        description: 'MCP server callback URL'
+        type: string
+
+      project_data:
+        description: "Serialized Remotion project"
         required: true
-      session_id:
-        description: 'Session ID'
-        required: true
+        type: string
 
 jobs:
   render:
     runs-on: ubuntu-latest
+
+    permissions:
+      contents: read
+
     steps:
-      - uses: actions/checkout@v4
+      - name: Checkout repository
+        uses: actions/checkout@v4
 
-      - uses: actions/setup-node@v4
+      - name: Setup Node.js
+        uses: actions/setup-node@v4
         with:
-          node-version: '20'
+          node-version: 20
 
-      - name: Install Dependencies
+      - name: Install dependencies
         run: npm install
 
-      - name: Write video source files
-        run: node scripts/write-video-files.mjs
-        env:
-          VIDEO_FILES: ${{ github.event.inputs.files }}
-
-      - name: Make output directory
-        run: mkdir -p out
-
-      - name: Write props file
-        run: echo '${{ github.event.inputs.props }}' > input-props.json
-
-      - name: Create registerRoot wrapper
+      - name: Create temp directories
         run: |
-          ENTRY_FILE="${{ github.event.inputs.entry_file }}"
-          ENTRY_RELATIVE="${ENTRY_FILE#/}"
+          mkdir -p temp
+          mkdir -p renders
 
-          echo "📝 Original entry file: $ENTRY_FILE"
-          echo "📝 Relative path: $ENTRY_RELATIVE"
-
-          if [[ "$ENTRY_RELATIVE" == "src/Video.tsx" ]]; then
-            echo "🔧 Creating src/index.tsx with registerRoot wrapper..."
-            mkdir -p src
-            cat > src/index.tsx << WRAPPER
-          import { registerRoot, Composition } from 'remotion';
-          import Video from './Video';
-
-          function Root() {
-            return (
-              <Composition
-                id="${{ github.event.inputs.composition_id }}"
-                component={Video}
-                durationInFrames={${{ github.event.inputs.duration_in_frames }}}
-                fps={${{ github.event.inputs.fps }}}
-                width={${{ github.event.inputs.width }}}
-                height={${{ github.event.inputs.height }}}
-              />
-            );
-          }
-
-          registerRoot(Root);
-          WRAPPER
-            echo "✅ Created src/index.tsx with registerRoot"
-          else
-            echo "✅ Using provided entry file: $ENTRY_RELATIVE"
-          fi
-
-      - name: Verify entry file exists
+      - name: Write project payload
         run: |
-          ENTRY_FILE="${{ github.event.inputs.entry_file }}"
-          ENTRY_RELATIVE="${ENTRY_FILE#/}"
+          cat <<'EOF' > temp/project.json
+          ${{ github.event.inputs.project_data }}
+          EOF
 
-          if [[ "$ENTRY_RELATIVE" == "src/Video.tsx" ]]; then
-            ENTRY_RELATIVE="src/index.tsx"
-          fi
+      - name: Verify project payload
+        run: |
+          echo "Project payload created"
+          ls -la temp
+          cat temp/project.json | head -20
 
-          echo "🔍 Checking entry file: $ENTRY_RELATIVE"
+      - name: Generate Remotion entry
+        run: |
+          node scripts/generate-project.js
 
-          if [ ! -f "$ENTRY_RELATIVE" ]; then
-            echo "❌ Entry file not found: $ENTRY_RELATIVE"
-            echo "📁 Available files:"
-            find src -name "*.tsx" -o -name "*.ts" 2>/dev/null | head -10
-            exit 1
-          fi
-          echo "✅ Entry file found: $ENTRY_RELATIVE"
-
-          echo "ENTRY_FINAL=$ENTRY_RELATIVE" >> $GITHUB_ENV
+      - name: Build Remotion bundle
+        run: |
+          npx remotion bundle src/index.tsx
 
       - name: Render MP4
-        env:
-          COMPOSITION_ID: ${{ github.event.inputs.composition_id }}
-          PROPS_PATH: "./input-props.json"
         run: |
-          echo "🎬 Starting Remotion render..."
-          echo "   Entry: $ENTRY_FINAL"
-          echo "   Composition: $COMPOSITION_ID"
-          echo "   Props: $PROPS_PATH"
-
           npx remotion render \
-            "$ENTRY_FINAL" \
-            "$COMPOSITION_ID" \
-            out/video.mp4 \
-            --props="$PROPS_PATH"
-            
-      - name: Upload GitHub Artifact
+            src/index.tsx \
+            Main \
+            renders/${{ github.event.inputs.project_id }}.mp4
+
+      - name: Verify rendered video
+        run: |
+          ls -lah renders
+
+      - name: Upload MP4 artifact
         uses: actions/upload-artifact@v4
         with:
-          name: rendered-video
-          path: out/video.mp4
-          retention-days: 7
+          name: remotion-render
+          path: renders/${{ github.event.inputs.project_id }}.mp4
 
-      - name: Upload video and Notify Webhook
+      - name: Generate fake public URL
+        id: public_url
         run: |
-          echo "📤 Uploading video to bashupload.com..."
-          
-          # Upload with 3 retries to avoid Exit Code 7
-          URL=$(curl -s --retry 3 -T out/video.mp4 https://bashupload.com)
-          
-          if [ -z "$URL" ]; then
-            echo "❌ Upload failed"
-            exit 1
-          fi
-          
-          echo "✅ Upload complete: $URL"
+          echo "url=https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> $GITHUB_OUTPUT
 
-      - name: Get Artifact URL and callback
+      - name: Notify callback endpoint
+        env:
+          CALLBACK_URL: ${{ secrets.RENDER_CALLBACK_URL }}
         run: |
-          echo "📤 Uploading video to bashupload.com..."
-          
-          # Upload with 3 retries to avoid Exit Code 7
-          # URLP=$(curl -s --retry 3 -T out/video.mp4 https://bashupload.com)
-          
-          # if [ -z "$URLP" ]; then
-          #  echo "❌ Upload failed"
-          #  exit 1
-          # fi
-          
-          # echo "✅ Upload complete: $URLP"
-          
-          echo "🔍 Getting artifact info..."
-
-          # Get artifact ID via GitHub API
-          ARTIFACT=$(curl -s \
-            -H "Authorization: Bearer ${{ secrets.GITHUB_TOKEN }}" \
-            -H "Accept: application/vnd.github+json" \
-            "https://api.github.com/repos/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts")
-
-          ARTIFACT_ID=$(echo $ARTIFACT | python3 -c "
-          import sys, json
-          data = json.load(sys.stdin)
-          print(data['artifacts'][0]['id'])
-          ")
-
-          # Construct artifact URL
-          URL="https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}/artifacts/$ARTIFACT_ID"
-          echo "✅ Artifact URL: $URL"
-
-          # Send callback
-          curl -s -X POST "${{ github.event.inputs.callback_url }}/render-complete" \
+          curl -X POST "$CALLBACK_URL" \
             -H "Content-Type: application/json" \
-            -d "{\"session_id\": \"${{ github.event.inputs.session_id }}\", \"url\": \"$URL\"}"
+            -d '{
+              "projectId":"${{ github.event.inputs.project_id }}",
+              "status":"completed",
+              "renderId":"${{ github.run_id }}",
+              "url":"${{ steps.public_url.outputs.url }}"
+            }'
 
-          echo "✅ Callback sent"
+      - name: Done
+        run: |
+          echo "Render completed successfully"
