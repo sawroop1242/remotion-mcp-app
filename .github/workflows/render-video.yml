@@ -129,6 +129,12 @@ jobs:
             "$COMPOSITION_ID" \
             out/video.mp4 \
             --props="$PROPS_PATH"
+      - name: Upload artifact to GitHub
+        uses: actions/upload-artifact@v4
+        with:
+          name: rendered-video
+          path: out/video.mp4
+          retention-days: 7    
 
       - name: Upload to transfer.sh and callback
         run: |
