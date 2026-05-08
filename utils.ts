@@ -1,530 +1,214 @@
-import { text, widget } from "mcp-use/server";
-import { z } from "zod";
-import { build, type Loader, type Plugin } from "esbuild";
 import path from "node:path";
-import * as ReactModule from "react";
-import * as ReactJsxRuntimeModule from "react/jsx-runtime";
-import * as ReactJsxDevRuntimeModule from "react/jsx-dev-runtime";
-import * as RemotionModule from "remotion";
-import {
-  RUNTIME_BUNDLE_GLOBAL,
-  RUNTIME_PACKAGE_GLOBAL,
-  type VideoProjectData,
-} from "./types.js";
+import fs from "node:fs";
+import crypto from "node:crypto";
 
-const IDENTIFIER_PATTERN = /^[A-Za-z_$][A-Za-z0-9_$]*$/;
-const USER_FILE_NAMESPACE = "user-file";
-const SHIM_FILE_NAMESPACE = "runtime-shim";
-const SUPPORTED_FILE_EXTENSIONS = [
-  ".tsx",
-  ".ts",
-  ".jsx",
-  ".js",
-  ".mjs",
-  ".cjs",
-  ".json",
-  ".css",
-  ".svg",
-  ".png",
-  ".jpg",
-  ".jpeg",
-  ".gif",
-  ".webp",
-  ".mp4",
-  ".webm",
-  ".mov",
-  ".mp3",
-  ".wav",
-  ".ogg",
-] as const;
+export type FileMap = Record<string, string>;
 
-const RUNTIME_MODULES: Record<string, Record<string, unknown>> = {
-  react: ReactModule as Record<string, unknown>,
-  "react/jsx-runtime": ReactJsxRuntimeModule as Record<string, unknown>,
-  "react/jsx-dev-runtime": ReactJsxDevRuntimeModule as Record<string, unknown>,
-  remotion: RemotionModule as Record<string, unknown>,
-};
-
-function createRuntimeShim(moduleName: string, moduleNamespace: Record<string, unknown>): string {
-  const namedExports = Object.keys(moduleNamespace)
-    .filter((name) => name !== "default" && IDENTIFIER_PATTERN.test(name))
-    .sort();
-
-  const exportLines = namedExports.map((name) => `export const ${name} = runtime.${name};`).join("\n");
-
-  return [
-    `const modules = globalThis.${RUNTIME_PACKAGE_GLOBAL};`,
-    `const runtime = modules?.[${JSON.stringify(moduleName)}];`,
-    `if (!runtime) throw new Error(${JSON.stringify(`Missing runtime module: ${moduleName}`)});`,
-    "export default runtime.default;",
-    exportLines,
-    "",
-  ].join("\n");
+export interface SessionProjectState {
+  files: FileMap;
+  entryFile: string;
+  title: string;
+  durationInFrames: number;
+  fps: number;
+  width: number;
+  height: number;
 }
 
-const SHIM_MODULE_SOURCES: Record<string, string> = Object.fromEntries(
-  Object.entries(RUNTIME_MODULES).map(([moduleName, moduleNamespace]) => [
-    moduleName,
-    createRuntimeShim(moduleName, moduleNamespace),
-  ])
+const PROJECT_STORAGE_DIR = path.join(
+  process.cwd(),
+  ".video-projects"
 );
 
-function normalizeVirtualPath(filePath: string): string {
-  const unixPath = filePath.replace(/\\/g, "/").replace(/^\/+/, "");
-  const normalized = path.posix.normalize(`/${unixPath}`);
-  if (!normalized.startsWith("/")) {
-    throw new Error(`Invalid file path: ${filePath}`);
-  }
-  return normalized;
+if (!fs.existsSync(PROJECT_STORAGE_DIR)) {
+  fs.mkdirSync(PROJECT_STORAGE_DIR, {
+    recursive: true,
+  });
 }
 
-function normalizeFileMap(files: Record<string, string>): Record<string, string> {
-  const normalizedFiles: Record<string, string> = {};
-  for (const [rawFilePath, contents] of Object.entries(files)) {
-    if (typeof contents !== "string") {
-      throw new Error(`File \"${rawFilePath}\" must be a string.`);
-    }
-    normalizedFiles[normalizeVirtualPath(rawFilePath)] = contents;
-  }
-  return normalizedFiles;
+function cloneFileMap(files: FileMap): FileMap {
+  return Object.fromEntries(
+    Object.entries(files).map(([key, value]) => [
+      key,
+      value,
+    ])
+  );
 }
 
-function getLoader(filePath: string): Loader {
-  const extension = path.posix.extname(filePath).toLowerCase();
-  switch (extension) {
-    case ".tsx":
-      return "tsx";
-    case ".ts":
-      return "ts";
-    case ".jsx":
-      return "jsx";
-    case ".mjs":
-    case ".cjs":
-    case ".js":
-      return "js";
-    case ".json":
-      return "json";
-    case ".css":
-      return "css";
-    case ".svg":
-    case ".png":
-    case ".jpg":
-    case ".jpeg":
-    case ".gif":
-    case ".webp":
-    case ".mp4":
-    case ".webm":
-    case ".mov":
-    case ".mp3":
-    case ".wav":
-    case ".ogg":
-      return "dataurl";
-    default:
-      return "tsx";
-  }
+function getProjectPath(projectId: string): string {
+  return path.join(
+    PROJECT_STORAGE_DIR,
+    `${projectId}.json`
+  );
 }
 
-function resolveVirtualImport(
-  importPath: string,
-  importer: string,
-  files: Record<string, string>
-): string | null {
-  if (!importPath.startsWith(".") && !importPath.startsWith("/")) {
+export function createProjectId(): string {
+  return crypto.randomUUID();
+}
+
+export function saveProject(
+  projectId: string,
+  project: SessionProjectState
+): void {
+  fs.writeFileSync(
+    getProjectPath(projectId),
+    JSON.stringify(project, null, 2),
+    "utf8"
+  );
+}
+
+export function loadProject(
+  projectId: string
+): SessionProjectState | null {
+  const filePath = getProjectPath(projectId);
+
+  if (!fs.existsSync(filePath)) {
     return null;
   }
 
-  const basePath = importPath.startsWith("/")
-    ? normalizeVirtualPath(importPath)
-    : normalizeVirtualPath(path.posix.resolve(path.posix.dirname(importer), importPath));
-
-  const candidates = new Set<string>();
-  const extension = path.posix.extname(basePath);
-
-  if (extension.length > 0) {
-    candidates.add(basePath);
-  } else {
-    candidates.add(basePath);
-    for (const candidateExtension of SUPPORTED_FILE_EXTENSIONS) {
-      candidates.add(`${basePath}${candidateExtension}`);
-      candidates.add(path.posix.join(basePath, `index${candidateExtension}`));
-    }
-  }
-
-  for (const candidate of candidates) {
-    if (candidate in files) {
-      return candidate;
-    }
-  }
-
-  return null;
+  return JSON.parse(
+    fs.readFileSync(filePath, "utf8")
+  ) as SessionProjectState;
 }
 
-function formatCompileFailure(error: unknown): string {
-  const fallback = (error as Error)?.message ?? "Unknown build error.";
-  const maybe = error as {
-    errors?: Array<{
-      text: string;
-      location?: {
-        file?: string;
-        line?: number;
-        column?: number;
-        lineText?: string;
-      } | null;
-    }>;
-  };
+export function deleteProject(
+  projectId: string
+): void {
+  const filePath = getProjectPath(projectId);
 
-  if (!Array.isArray(maybe.errors) || maybe.errors.length === 0) {
-    return fallback;
+  if (fs.existsSync(filePath)) {
+    fs.unlinkSync(filePath);
   }
-
-  const lines = maybe.errors.slice(0, 5).map((err) => {
-    const location = err.location;
-    if (!location) {
-      return err.text;
-    }
-
-    const column = typeof location.column === "number" ? location.column + 1 : undefined;
-    const at = [location.file, location.line, column].filter(Boolean).join(":");
-    const context = location.lineText ? `\n> ${location.lineText.trim()}` : "";
-    return `${at} ${err.text}${context}`;
-  });
-
-  return lines.join("\n");
 }
 
-function addRemotionCompileHints(message: string): string {
-  const hints: string[] = [];
+export function listProjects(): string[] {
+  return fs
+    .readdirSync(PROJECT_STORAGE_DIR)
+    .filter((file) => file.endsWith(".json"))
+    .map((file) => file.replace(".json", ""));
+}
 
-  if (message.includes("No matching export") && message.includes("TransitionSeries")) {
-    hints.push(
-      "Hint: import TransitionSeries from @remotion/transitions, not from remotion."
+export function cleanupOldProjects(
+  maxAgeHours = 24
+): void {
+  const now = Date.now();
+
+  for (const file of fs.readdirSync(
+    PROJECT_STORAGE_DIR
+  )) {
+    const fullPath = path.join(
+      PROJECT_STORAGE_DIR,
+      file
     );
-  }
-  if (message.includes("No matching export") && message.includes("fade")) {
-    hints.push("Hint: import fade from @remotion/transitions/fade.");
-  }
-  if (message.toLowerCase().includes("unterminated string literal")) {
-    hints.push("Hint: check for missing quote characters in JSX style/object literals.");
-  }
 
-  if (!hints.length) {
-    return message;
+    const stat = fs.statSync(fullPath);
+
+    const ageHours =
+      (now - stat.mtimeMs) / (1000 * 60 * 60);
+
+    if (ageHours > maxAgeHours) {
+      fs.unlinkSync(fullPath);
+    }
   }
-  return `${message}\n\n${hints.join("\n")}`;
 }
 
-async function compileProjectBundle(files: Record<string, string>, entryFile: string): Promise<string> {
-  const normalizedFiles = normalizeFileMap(files);
-  const normalizedEntry = normalizeVirtualPath(entryFile);
+export function buildProjectState(params: {
+  previous?: SessionProjectState | null;
+  files?: FileMap;
+  entryFile?: string;
+  title?: string;
+  durationInFrames?: number;
+  fps?: number;
+  width?: number;
+  height?: number;
+}): SessionProjectState {
+  const previous = params.previous;
 
-  if (!(normalizedEntry in normalizedFiles)) {
-    const availableFiles = Object.keys(normalizedFiles).sort().join(", ");
-    throw new Error(
-      `Entry file \"${normalizedEntry}\" does not exist. Available files: ${availableFiles || "none"}.`
-    );
-  }
-
-  const virtualProjectPlugin: Plugin = {
-    name: "virtual-project",
-    setup(buildContext) {
-      buildContext.onResolve({ filter: /.*/ }, (args) => {
-        if (args.path in SHIM_MODULE_SOURCES) {
-          return { path: args.path, namespace: SHIM_FILE_NAMESPACE };
-        }
-
-        if (args.path.startsWith(".") || args.path.startsWith("/")) {
-          const importer = args.importer && args.importer !== "<stdin>" ? args.importer : normalizedEntry;
-          const resolvedFilePath = resolveVirtualImport(args.path, importer, normalizedFiles);
-          if (resolvedFilePath) {
-            return { path: resolvedFilePath, namespace: USER_FILE_NAMESPACE };
-          }
-
-          return {
-            errors: [
-              {
-                text: `Cannot resolve import \"${args.path}\" from \"${importer}\".`,
-              },
-            ],
-          };
-        }
-
-        // Allow all bare specifiers and let esbuild resolve from node_modules.
-        return;
-      });
-
-      buildContext.onLoad({ filter: /.*/, namespace: SHIM_FILE_NAMESPACE }, (args) => {
-        return {
-          contents: SHIM_MODULE_SOURCES[args.path],
-          loader: "js",
-          resolveDir: "/",
-        };
-      });
-
-      buildContext.onLoad({ filter: /.*/, namespace: USER_FILE_NAMESPACE }, (args) => {
-        const contents = normalizedFiles[args.path];
-        if (typeof contents !== "string") {
-          return {
-            errors: [{ text: `Could not load file \"${args.path}\".` }],
-          };
-        }
-        return {
-          contents,
-          loader: getLoader(args.path),
-          // Resolve bare imports from project node_modules, not from the virtual path.
-          resolveDir: process.cwd(),
-        };
-      });
-    },
-  };
-
-  let result;
-  try {
-    result = await build({
-      bundle: true,
-      write: false,
-      format: "iife",
-      platform: "browser",
-      target: ["es2020"],
-      globalName: RUNTIME_BUNDLE_GLOBAL,
-      jsx: "automatic",
-      logLevel: "silent",
-      stdin: {
-        loader: "ts",
-        resolveDir: process.cwd(),
-        contents: [
-          `import * as entryModule from ${JSON.stringify(normalizedEntry)};`,
-          `export default entryModule.default;`,
-          `export * from ${JSON.stringify(normalizedEntry)};`,
-        ].join("\n"),
-      },
-      plugins: [virtualProjectPlugin],
-    });
-  } catch (error) {
-    throw new Error(addRemotionCompileHints(formatCompileFailure(error)));
-  }
-
-  const output = result.outputFiles[0]?.text;
-  if (!output) {
-    throw new Error("Compilation produced no JavaScript output.");
-  }
-
-  return output;
-}
-
-function validatePositiveNumber(name: string, value: number): string | null {
-  if (!Number.isFinite(value) || value <= 0) {
-    return `${name} must be a positive number.`;
-  }
-  return null;
-}
-
-export const DEFAULT_META = {
-  title: "Untitled",
-  compositionId: "Main",
-  width: 1920,
-  height: 1080,
-  fps: 30,
-  durationInFrames: 150,
-};
-
-const ERROR_FALLBACK_BUNDLE = `var ${RUNTIME_BUNDLE_GLOBAL} = { default: function RemotionFallback() { return null; } };`;
-
-export type SessionProjectState = {
-  title: string;
-  compositionId: string;
-  width: number;
-  height: number;
-  fps: number;
-  durationInFrames: number;
-  entryFile: string;
-  files: Record<string, string>;
-  defaultProps: Record<string, unknown>;
-  inputProps: Record<string, unknown>;
-};
-
-export type ProjectVideoInput = {
-  title: string;
-  compositionId: string;
-  width: number;
-  height: number;
-  fps: number;
-  durationInFrames: number;
-  entryFile: string;
-  files: Record<string, string>;
-  defaultProps: Record<string, unknown>;
-  inputProps: Record<string, unknown>;
-};
-
-const sessionProjects = new Map<string, SessionProjectState>();
-const MAX_SESSION_PROJECTS = 250;
-
-function buildProjectData(
-  overrides: Partial<VideoProjectData["meta"]> & { title?: string },
-  config: {
-    bundle?: string;
-    defaultProps?: Record<string, unknown>;
-    inputProps?: Record<string, unknown>;
-    compileError?: string;
-  }
-): VideoProjectData {
   return {
-    meta: {
-      title: overrides.title ?? DEFAULT_META.title,
-      compositionId: overrides.compositionId ?? DEFAULT_META.compositionId,
-      width: overrides.width ?? DEFAULT_META.width,
-      height: overrides.height ?? DEFAULT_META.height,
-      fps: overrides.fps ?? DEFAULT_META.fps,
-      durationInFrames: overrides.durationInFrames ?? DEFAULT_META.durationInFrames,
-    },
-    bundle: config.bundle ?? ERROR_FALLBACK_BUNDLE,
-    defaultProps: config.defaultProps ?? {},
-    inputProps: config.inputProps ?? {},
-    compileError: config.compileError,
+    files: cloneFileMap({
+      ...(previous?.files ?? {}),
+      ...(params.files ?? {}),
+    }),
+
+    entryFile:
+      params.entryFile ??
+      previous?.entryFile ??
+      "/src/Video.tsx",
+
+    title:
+      params.title ??
+      previous?.title ??
+      "Remotion Video",
+
+    durationInFrames:
+      params.durationInFrames ??
+      previous?.durationInFrames ??
+      150,
+
+    fps:
+      params.fps ??
+      previous?.fps ??
+      30,
+
+    width:
+      params.width ??
+      previous?.width ??
+      1920,
+
+    height:
+      params.height ??
+      previous?.height ??
+      1080,
   };
 }
 
-export function formatZodIssues(error: z.ZodError): string {
-  if (!error.issues.length) {
-    return "Invalid input.";
-  }
+export function createStoredProject(params: {
+  previous?: SessionProjectState | null;
+  files?: FileMap;
+  entryFile?: string;
+  title?: string;
+  durationInFrames?: number;
+  fps?: number;
+  width?: number;
+  height?: number;
+}) {
+  const state = buildProjectState(params);
 
-  return error.issues
-    .map((issue) => {
-      const path = issue.path.length ? issue.path.join(".") : "input";
-      return `${path}: ${issue.message}`;
-    })
-    .join("; ");
-}
+  const projectId = createProjectId();
 
-function cloneRecord(value: Record<string, unknown>): Record<string, unknown> {
-  return { ...value };
-}
+  saveProject(projectId, state);
 
-function cloneFileMap(value: Record<string, string>): Record<string, string> {
-  return { ...value };
-}
-
-function rememberSessionProject(sessionId: string, project: SessionProjectState): void {
-  if (!sessionId) {
-    return;
-  }
-
-  if (sessionProjects.has(sessionId)) {
-    sessionProjects.delete(sessionId);
-  }
-  sessionProjects.set(sessionId, project);
-
-  while (sessionProjects.size > MAX_SESSION_PROJECTS) {
-    const oldestKey = sessionProjects.keys().next().value;
-    if (typeof oldestKey !== "string") {
-      break;
-    }
-    sessionProjects.delete(oldestKey);
-  }
-}
-
-export function failProject(
-  message: string,
-  fallbackMeta?: Partial<VideoProjectData["meta"]>,
-  fallbackProps?: {
-    defaultProps?: Record<string, unknown>;
-    inputProps?: Record<string, unknown>;
-  }
-) {
-  const errorProject = buildProjectData(fallbackMeta ?? {}, {
-    compileError: message,
-    defaultProps: fallbackProps?.defaultProps,
-    inputProps: fallbackProps?.inputProps,
-  });
-
-  return widget({
-    props: { videoProject: JSON.stringify(errorProject) },
-    output: text(`Project error: ${message}`),
-  });
-}
-
-export function getSessionProject(sessionId: string): SessionProjectState | null {
-  return sessionProjects.get(sessionId) ?? null;
-}
-
-export async function compileAndRespondWithProject(
-  parsedInput: ProjectVideoInput,
-  sessionId: string,
-  statusPrefixLines: string[],
-  iterateToolName: "create_video" | "update_video"
-) {
-  const {
-    title,
-    compositionId,
-    width,
-    height,
-    fps,
-    durationInFrames,
-    entryFile,
-    files,
-    defaultProps,
-    inputProps,
-  } = parsedInput;
-
-  const meta = { title, compositionId, width, height, fps, durationInFrames };
-
-  for (const [fieldName, value] of [
-    ["width", width],
-    ["height", height],
-    ["fps", fps],
-    ["durationInFrames", durationInFrames],
-  ] as const) {
-    const error = validatePositiveNumber(fieldName, value);
-    if (error) {
-      return failProject(error, meta, { defaultProps, inputProps });
-    }
-  }
-
-  const currentState: SessionProjectState = {
-    title,
-    compositionId,
-    width,
-    height,
-    fps,
-    durationInFrames,
-    entryFile,
-    files: cloneFileMap(files),
-    defaultProps: cloneRecord(defaultProps),
-    inputProps: cloneRecord(inputProps),
+  return {
+    projectId,
+    state,
   };
-  rememberSessionProject(sessionId, currentState);
+}
 
-  let bundle: string;
-  try {
-    bundle = await compileProjectBundle(files, entryFile);
-  } catch (error) {
-    return failProject(`Project compilation error: ${(error as Error).message}`, meta, {
-      defaultProps,
-      inputProps,
-    });
+export function updateStoredProject(
+  projectId: string,
+  params: {
+    files?: FileMap;
+    entryFile?: string;
+    title?: string;
+    durationInFrames?: number;
+    fps?: number;
+    width?: number;
+    height?: number;
+  }
+) {
+  const previous = loadProject(projectId);
+
+  if (!previous) {
+    throw new Error(
+      `Project not found: ${projectId}`
+    );
   }
 
-  const projectData: VideoProjectData = buildProjectData(meta, {
-    bundle,
-    defaultProps,
-    inputProps,
+  const updated = buildProjectState({
+    previous,
+    ...params,
   });
 
-  return widget({
-    props: { videoProject: JSON.stringify(projectData) },
-    output: text(
-      [
-        ...statusPrefixLines,
-        `Created video project \"${title}\".`,
-        `Entry: ${entryFile} (${Object.keys(files).length} files).`,
-        `Fallback meta: ${width}x${height}, ${fps}fps, ${durationInFrames} frames (~${(
-          durationInFrames / fps
-        ).toFixed(1)}s).`,
-        "The player is using merged props (defaultProps + inputProps).",
-        `To iterate: update files, props, or metadata and call ${iterateToolName} again.`,
-      ]
-        .filter((line) => line.trim().length > 0)
-        .join("\n")
-    ),
-  });
+  saveProject(projectId, updated);
+
+  return updated;
 }
